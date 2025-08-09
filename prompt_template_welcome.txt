@@ -1,0 +1,8 @@
+Hi {{Cam Newton}},
+
+Welcome to Pixel Learning Co.! Here are three quick tips to get started:
+1. {{Win the Heisman}}
+2. {{tip2Scream War Eagle}}
+3. {{Get Drafted}}
+
+Happy learning!

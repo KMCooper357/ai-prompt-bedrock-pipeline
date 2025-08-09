@@ -1,0 +1,9 @@
+{
+  "output_file": "welcome_{{Cam Newton}}.html",
+  "variables": {
+    "student_name": "Jordan",
+    "tip1": "Win the Heisman",
+    "tip2": "Scream War Eagle!",
+    "tip3": "Get Drafted"
+  }
+}
