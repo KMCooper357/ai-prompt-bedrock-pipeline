@@ -1,114 +1,111 @@
-# generate_and_upload.py
-
-import boto3
 import os
 import json
-import pathlib
-import jinja2
+from pathlib import Path
+import boto3
 from jinja2 import Template
 
-# ---------- Constants ----------
-MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
-BETA_PREFIX = os.getenv("BETA_PREFIX", "beta/")
-PROD_PREFIX = os.getenv("PROD_PREFIX", "prod/")
+# Constants
+BEDROCK_MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
 
-# ---------- Helpers ----------
+def render_template(template_path, variables):
+    with open(template_path) as f:
+        template = Template(f.read())
+    return template.render(**variables)
 
-def get_region() -> str:
-    """Return AWS region from environment variables or raise an error."""
-    region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION")
+def call_bedrock(prompt, max_tokens=1024):
+    region = os.environ.get("AWS_REGION")
     if not region:
-        raise ValueError(
-            "[❌] No AWS region specified.\n"
-            "➡️  Set AWS_REGION or AWS_DEFAULT_REGION (e.g., 'us-east-1')."
-        )
-    return region
+        raise ValueError("AWS_REGION environment variable is not set.")
 
-def render_prompt(template_path: str, config: dict) -> str:
-    """Render a Jinja2 template with variables from a config dictionary."""
-    template = jinja2.Template(pathlib.Path(template_path).read_text())
-    return template.render(**config["variables"])
+    client = boto3.client("bedrock-runtime", region_name=region)
 
-def construct_body(prompt: str, max_tokens: int = 300) -> dict:
-    """Create the request body for Bedrock model invocation."""
-    return {
+    body = {
         "anthropic_version": "bedrock-2023-05-31",
         "max_tokens": max_tokens,
         "messages": [
-            {"role": "user", "content": f"Human: {prompt}"}
-        ],
+            {
+                "role": "user",
+                "content": f"Human: {prompt}"
+            }
+        ]
     }
 
-def call_bedrock(prompt: str, max_tokens: int, region: str) -> str:
-    """Invoke Claude 3 Sonnet via Bedrock and return the model output."""
-    br = boto3.client("bedrock-runtime", region_name=region)
-    response = br.invoke_model(
-        body=json.dumps(construct_body(prompt, max_tokens)),
-        modelId=MODEL_ID,
+    response = client.invoke_model(
+        modelId=BEDROCK_MODEL_ID,
+        body=json.dumps(body)
     )
-    result = json.loads(response["body"].read())
-    return "".join(chunk["text"] for chunk in result["content"])
 
-# ---------- Main Workflow ----------
+    response_body = json.loads(response["body"].read())
+    content = response_body.get("content", [])
+
+    if isinstance(content, list):
+        return "".join([block.get("text", "") for block in content])
+    return content
+
+def upload_to_s3(file_path, bucket_name, key):
+    s3 = boto3.client("s3")
+    s3.upload_file(str(file_path), bucket_name, key)
+    print(f"[S3 Upload] s3://{bucket_name}/{key}")
+
+def copy_to_root_index(bucket_name, source_key):
+    s3 = boto3.client("s3")
+    s3.copy_object(
+        Bucket=bucket_name,
+        CopySource={'Bucket': bucket_name, 'Key': source_key},
+        Key="index.html",
+        ContentType='text/html',
+        MetadataDirective='REPLACE'
+    )
+    print(f"[S3 Copy] {source_key} → index.html")
+
+def main(env, bucket):
+    prompts_dir = Path("prompts")
+    templates_dir = Path("prompt_templates")
+    outputs_dir = Path("outputs")
+    outputs_dir.mkdir(exist_ok=True)
+
+    for prompt_file in prompts_dir.glob("*.json"):
+        with open(prompt_file) as f:
+            config = json.load(f)
+
+        template_file = templates_dir / prompt_file.name.replace(".json", ".txt")
+        if not template_file.exists():
+            print(f"[WARN] Template missing for {prompt_file.name}. Skipping.")
+            continue
+
+        # Render + send to Bedrock
+        rendered_prompt = render_template(template_file, config)
+        bedrock_response = call_bedrock(rendered_prompt)
+
+        # Write output
+        output_ext = config.get("output_format", "html")
+        output_filename = prompt_file.stem + f".{output_ext}"
+        output_path = outputs_dir / output_filename
+
+        with open(output_path, "w") as out_f:
+            out_f.write(bedrock_response)
+
+        # Upload to S3 path
+        s3_key = f"{env}/outputs/{output_filename}"
+        upload_to_s3(output_path, bucket, s3_key)
+
+        # Copy to root index.html
+        copy_to_root_index(bucket, s3_key)
 
 def main(env: str = "beta") -> None:
-    """Render prompts, generate completions, and upload outputs to S3."""
     region = get_region()
     s3 = boto3.client("s3", region_name=region)
 
-    # Choose correct bucket based on environment
     bucket = (
         os.getenv("S3_BUCKET_BETA")
         if env == "beta"
         else os.getenv("S3_BUCKET_PROD")
     )
-
     if not bucket:
         raise ValueError(
             f"[❌] No S3 bucket defined for environment '{env}'.\n"
             f"➡️  Set {'S3_BUCKET_BETA' if env == 'beta' else 'S3_BUCKET_PROD'}."
         )
 
-    prefix = BETA_PREFIX if env == "beta" else PROD_PREFIX
-    pathlib.Path("outputs").mkdir(exist_ok=True)
+    # rest of your code...
 
-    for config_path in pathlib.Path("prompts").glob("*.json"):
-        cfg = json.loads(config_path.read_text())
-
-        # 1️⃣ Render the prompt
-        template_file = f"prompt_templates/{config_path.stem.replace('_prompt', '')}.txt"
-        rendered_prompt = render_prompt(template_file, cfg)
-
-        # 2️⃣ Render the output filename
-        filename_rendered = Template(cfg["output_file"]).render(**cfg["variables"])
-
-        # 3️⃣ Generate model completion
-        completion = call_bedrock(rendered_prompt, max_tokens=300, region=region)
-
-        # 4️⃣ Save output locally
-        output_path = pathlib.Path("outputs") / filename_rendered
-        output_path.write_text(completion, encoding="utf-8")
-
-        # 5️⃣ Upload to S3
-        s3_key = f"{prefix}{filename_rendered}"
-        s3.upload_file(
-            output_path.as_posix(),
-            bucket,
-            s3_key,
-            ExtraArgs={"ContentType": "text/html"}
-        )
-        print(f"✅ Uploaded ➜ s3://{bucket}/{s3_key}")
-
-        # 6️⃣ Optionally publish as index.html
-        if cfg.get("make_index", False):
-            index_key = f"{prefix}index.html"
-            s3.upload_file(
-                output_path.as_posix(),
-                bucket,
-                index_key,
-                ExtraArgs={"ContentType": "text/html"}
-            )
-            print(f"↪️  Also published as ➜ s3://{bucket}/{index_key}")
-
-if __name__ == "__main__":
-    main(os.getenv("DEPLOY_ENV", "beta"))
