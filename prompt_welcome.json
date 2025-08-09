@@ -1,9 +1,8 @@
 {
-  "output_file": "welcome_{{Cam Newton}}.html",
   "variables": {
-    "student_name": "Jordan",
-    "tip1": "Win the Heisman",
-    "tip2": "Scream War Eagle!",
-    "tip3": "Get Drafted"
-  }
+    "title": "Welcome!",
+    "subtitle": "Let’s build with Bedrock, do some GitHub actions, and be great."
+  },
+  "output_file": "welcome.html",
+  "make_index": true
 }
